@@ -1,0 +1,10 @@
+"","Timepoint Unadjusted p-values","Timepoint Coefficient Estimate","Timepoint Adjusted p-values","HIV Status Unadjusted p-values","HIV Status Coefficient Estimate","HIV Status Adjusted p-values","Interaction Unadjusted p-values","Interaction Coefficient Estimate","Interaction Adjusted p-values"
+"Corynebacterium_accolens",0.5186,-0.2723,1,0.2555,-2.3404,1,0.1817,0.7034,1
+"Corynebacterium_pseudodiphtheriticum",0.5762,0.247,1,0.2968,-1.9064,1,0.339,0.5141,1
+"Dolosigranulum_pigrum",0.0071,0.8961,0.064,0.2584,-1.8159,1,0.4208,0.3317,1
+"Haemophilus_influenzae",0,1.33,1e-04,0.1068,1.7556,0.9612,0.301,-0.4434,1
+"Staphylococcus_epidermidis",0.0262,-0.5721,0.2357,0.9723,-0.065,1,0.5598,-0.2112,1
+"Staphylococcus_haemolyticus",0.0072,-0.4468,0.065,0.0016,4.0377,0.014,0.0651,-0.6202,0.586
+"Staphylococcus_simiae",8e-04,-1.2684,0.0072,0.1145,-4.49,1,0.0763,0.8753,0.6863
+"Streptococcus_mitis",0,-1.2356,0,0.0592,-2.6022,0.5332,0.0042,0.6475,0.038
+"Streptococcus_pneumoniae",0,1.8058,0,0.1605,1.8498,1,0.5228,-0.2031,1

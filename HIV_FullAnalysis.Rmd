@@ -1,0 +1,1012 @@
+---
+title: "Microbiome analysis of HEU and HUU Zambian infants"
+author: "Aubrey R. Odom-Mabey"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+    toc_depth: 6
+    number_sections: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+  
+# Setup
+```{r setup, message = FALSE}
+suppressPackageStartupMessages({
+  # General use
+  library(tidyverse)
+  library(knitr)
+  library(magrittr)
+  # Data formats
+  library(animalcules)
+  library(MultiAssayExperiment)
+  library(SummarizedExperiment)
+  # Modeling
+  library(lme4)
+  library(geepack)
+  # Plotting
+  library(alluvial)
+  library(ggeffects)
+  library(emmeans)
+})
+```
+
+# Read in data
+```{r plotting}
+# Read in SE as "dat"
+dat <- readRDS("data/FinalDatOther.rds")
+
+# Infants only ----------------------------------------------------------------
+microbe <- dat[, which(dat$MothChild == "Infant")]
+sam_table <- as.data.frame(colData(microbe))
+
+# Both mothers and infants ----------------------------------------------------
+microbe_mi <- dat
+
+# Extract metadata, taxonomic information, and counts
+tax_table_mi <- as.data.frame(SummarizedExperiment::rowData(microbe_mi))
+sam_table_mi <- as.data.frame(SummarizedExperiment::colData(microbe_mi))
+
+counts_logcpm_mi <- SummarizedExperiment::assay(
+  microbe_mi, "log_cpm") %>% as.data.frame()
+counts_table_raw_mi <- SummarizedExperiment::assay(
+  microbe_mi, "counts") %>% as.data.frame()
+
+# Get raw counts tables
+ind <- sam_table_mi$MothChild == "Infant"
+counts_table_raw <- SummarizedExperiment::assay(microbe_mi, "counts") %>%
+    as.data.frame() %>%
+  select(sam_table_mi$Sample[ind])
+
+ind <- sam_table_mi$MothChild == "Mother"
+counts_table_raw_m <- SummarizedExperiment::assay(microbe_mi, "counts") %>%
+    as.data.frame() %>%
+  select(sam_table_mi$Sample[ind])
+
+```
+
+# Basic Data Exploration
+
+## Abundances of different genera
+### Genus
+```{R}
+all_genera_sums <- animalcules::upsample_counts(
+  counts_table_raw_mi, tax_table_mi, "genus") %>%
+  rowSums()
+
+pct <- all_genera_sums/sum(all_genera_sums)*100 %>%
+  as.vector() 
+
+as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
+  arrange(desc(pct))
+```
+
+### Phylum
+```{R}
+ind <- tax_table_mi$species == "Other"
+tax_table_mi$phylum[ind] <- "Other"
+
+all_genera_sums <- animalcules::upsample_counts(
+  counts_table_raw_mi, tax_table_mi, "phylum") %>%
+  rowSums()
+
+pct <- all_genera_sums/sum(all_genera_sums)*100 %>%
+  as.vector() 
+
+as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
+  arrange(desc(pct))
+```
+
+## How many unique phyla, genera, species (post-“othering”)
+```{R}
+sp_count <- tax_table_mi %>%
+  # Remove "others"
+  filter(species != "Other",
+         !stringr::str_detect(species, "_sp.")) %>%
+  distinct(species) %>%
+  dplyr::summarise(`Number of species` = n())
+
+# Number of genera 
+ge_count <- tax_table_mi %>%
+  distinct(genus) %>%
+  filter(genus != "Others") %>%
+  dplyr::summarise(`Number of genera` = n())
+
+# Number of phyla prior to subsetting
+ph_count <- tax_table_mi %>%
+  distinct(phylum) %>%
+  dplyr::summarise(`Number of phyla` = n())
+
+# Final counts
+bind_cols(ph_count, ge_count, sp_count)
+```
+
+## Obtain most abundant genera
+
+Using average relative abundance
+```{R}
+obtain_gn <- function(counts_tab, tax_tab) {
+  all_relabu_genus <- counts_tab |>
+    upsample_counts(tax_table = tax_tab, higher_level = "genus") |>
+    counts_to_relabu() |>
+    rownames_to_column(var = "genus") |>
+    filter(genus != "Other") |>
+    rowwise(genus) |>
+    # Sum evergything but the first columm ("genus")
+    summarise(allmeans = mean(c_across(starts_with("X"))),
+              .groups = "drop") |>
+    arrange(desc(allmeans))
+  
+  all_relabu_genus |> select(genus) |> unlist() |> unname() %>% 
+    c(., "Other") %>% return()
+}
+
+ind <- microbe_mi$MothChild == "Infant"
+best_genus <- obtain_gn(counts_table_raw_mi[, ind], tax_table_mi)
+
+ind <- microbe_mi$MothChild == "Mother"
+best_genus_m <- obtain_gn(counts_table_raw_mi[, ind], tax_table_mi)
+
+# Both moms and infants
+best_genus_mi <- obtain_gn(counts_table_raw_mi, tax_table_mi)
+```
+
+# Visualization & plots
+
+## Stacked bar plots
+```{r}
+get_stacked_data <- function(SE, sam_tab, tax_tab, MI) {
+  ind <- sam_tab$MothChild == MI
+  sam_subset <- sam_tab[ind, ]
+  counts_table_raw <- SummarizedExperiment::assay(SE, "counts") %>%
+    as.data.frame() %>%
+    select(sam_subset$Sample)
+  relabu_table <- counts_table_raw %>%
+    animalcules::upsample_counts(., tax_tab, "genus") %>%
+    animalcules::counts_to_relabu() %>% t() %>% as.data.frame() %>%
+    # Add grouping vars
+    mutate(covariate1 = sam_subset$HIVStatus,
+           covariate2 = sam_subset$timepoint) %>%
+    pivot_longer(!c(covariate1, covariate2), names_to = "taxon") %>%
+    S4Vectors::aggregate(. ~ taxon + covariate1 + covariate2, ., mean)
+  return(relabu_table)
+}
+
+stacked_mom <- get_stacked_data(microbe_mi, sam_tab = sam_table_mi,
+                                tax_tab = tax_table_mi, MI = "Mother")
+stacked_inf <- get_stacked_data(microbe_mi, sam_tab = sam_table_mi,
+                                tax_tab = tax_table_mi, MI = "Infant")
+```
+
+### Plot infants
+```{R}
+# Color palette
+usepalette <- paletteer::palettes_d[["ggsci"]]["category20_d3"] |>
+  unlist() |> unname() %>% 
+  # Make "Other" show as grey
+  .[seq_along(best_genus_mi[-1])] %>% c(., "grey")
+
+# Plot stacked barplot
+myplot <- stacked_inf %>%
+  mutate("Genus" = factor(taxon, levels = best_genus_mi),
+         "Age (days)" = factor(covariate2,
+                               levels = seq(0, 6),
+                               labels = c("0-15", "16-31", "32-47",
+                                          "48-63", "64-79", "80-95", "96-120")),
+         "HIV status" = factor(covariate1, levels = c("HIV", "Control"),
+                               labels = c("HEU", "HUU"))) %>%
+  dplyr::rename("Relative abundance" = `value`) %>%
+  ggplot(aes(fill = Genus, x = `Age (days)`, y = `Relative abundance`)) + 
+    geom_bar(position = "stack", stat = "identity") +
+  facet_grid(~`HIV status`) + theme_classic() +
+  labs(title = "Relative abundances of genera",
+       subtitle = "HEU vs. HUU infants") +
+  theme(legend.position = "bottom",
+        #axis.title.x = element_blank(), axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = usepalette) +
+  coord_flip()
+print(myplot)
+
+ggsave(filename = "PaperFigs/stacked_barplot_infants.png",
+  device = "png", width = 10, height = 6, units = "in", scale = 1)
+```
+
+### Plot mothers
+```{R}
+# Use ordered best_genus to match colors between plots
+
+# Color palette
+usepalette <- paletteer::palettes_d[["ggsci"]]["category20_d3"] |>
+  unlist() |> unname() %>% 
+  # Make "Other" show as grey
+  .[seq_along(best_genus_mi[-1])] %>% c(., "grey")
+
+# Plot stacked barplot
+myplot <- stacked_mom %>%
+  mutate("Genus" = factor(taxon, levels = best_genus_mi),
+         "Time point" = factor(covariate2,
+                               levels = c(0, 6),
+                               labels = c("First", "Last")),
+         "HIV status" = factor(covariate1, levels = c("HIV", "Control"),
+                               labels = c("HIV+", "HIV-"))) %>%
+  dplyr::rename("Relative abundance" = `value`) %>%
+  ggplot(aes(fill = Genus, x = `Time point`, y = `Relative abundance`)) + 
+    geom_bar(position = "stack", stat = "identity") +
+  facet_grid(~`HIV status`) + theme_classic() +
+  labs(title = "Relative abundances of genera",
+       subtitle = "HIV+ vs. HIV- mothers") +
+  theme(legend.position = "bottom",
+        #axis.title.x = element_blank(), axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = usepalette) +
+  coord_flip()
+print(myplot)
+
+ggsave(filename = "PaperFigs/stacked_barplot_mothers.png",
+  device = "png", width = 10, height = 6, units = "in", scale = 1)
+```
+
+### Finding a good palette
+```{R, eval = FALSE}
+#color_change <- function(num) {
+#  myplot <- relabu_table %>%
+#    mutate("Genus" = factor(taxon, levels = c("Other", taxon_order)),
+#           "Age (days)" = factor(covariate2,
+#                                 levels = seq(0, 6),
+#                                 labels = c("0-15", "16-31", "32-47",
+#                                            "48-63", "64-79", "80-95", "96-120")),
+#           "HIV status" = factor(covariate1, levels = c("HIV", "Control"),
+#                                 labels = c("HEU", "HUU"))) %>%
+#    dplyr::rename("Relative abundance" = `value`) %>%
+#    ggplot(aes(fill = Genus, x = `Age (days)`, y = `Relative abundance`)) + 
+#      geom_bar(position = "stack", stat = "identity") +
+#    facet_grid(~covariate1) +
+#    theme_classic() +
+#    labs(title = "Relative abundances of genera",
+#         subtitle = names(colorcombo[num])) +
+#    theme(legend.position = "bottom",
+#          #axis.title.x = element_blank(), axis.text.x = element_blank(),
+#          axis.ticks.x = element_blank()) +
+#    scale_fill_manual(values = unname(unlist(colorcombo[num])))
+#    coord_flip()
+#  print(myplot)
+#}
+#
+##ggsave(filename = paste0(
+##  stem, "aubrey/Tyler_16S_paper/Plots/StackedKozich.png"),
+##  device = "png", width = 12, height = 6, units = "in", scale = 1)
+#
+#all_palettes <- paletteer::palettes_d_names |>
+#  filter(length > length(unique(relabu_table$taxon)),
+#         type == "qualitative",
+#         package == "ggsci") |>
+#  select(package, palette)
+#
+#get_cols <- function(num) {
+#  this_package <- all_palettes$package[num]
+#  this_palette <- all_palettes$palette[num]
+#  out <- paletteer::palettes_d[[this_package]][this_palette] |>
+#    unlist() |> unname()
+#  return(c("grey", out))
+#}
+#
+#colorcombo <- lapply(seq_len(nrow(all_palettes)), get_cols)
+#names(colorcombo) <- paste(all_palettes$package, all_palettes$palette)
+#sapply(seq_along(colorcombo), color_change)
+```
+
+## Stacked area chart
+
+```{r function for stacked barplot}
+# Creates relative abundance table by timepoint, HIV status
+get_relabu <- function(stacked_df) {
+  relabu_table <- stacked_df %>%
+  dplyr::rename(HIVStatus = "covariate1", timepoint = "covariate2", `Relative abundance` = "value",
+         genus = taxon) %>%
+  relocate(timepoint, HIVStatus, genus, `Relative abundance`)
+  return(relabu_table)
+}
+```
+
+```{R}
+# Function to make plot
+genus_stacked <- function(input_df, genus_inp, mothinf = "infant") {
+  p <- input_df %>%
+    mutate(Genus = factor(genus, levels = all_of(genus_inp))) %>%
+    ggplot(aes(x = timepoint, y = `Relative abundance`,
+               fill = Genus)) + 
+    geom_area(alpha = 0.7, size = .5, colour = "white") +
+    scale_fill_manual(values = usepalette) +
+    theme_classic() +
+    facet_grid(rows = vars(HIVStatus)) +
+    labs(x = "Time point", y = "Relative abundance",
+         title = paste("Microbe composition of", mothinf, "samples"),
+         subtitle = "Relative abundance across samples")
+  if(mothinf == "mother") return(p + scale_x_continuous(breaks = c(0, 6)))
+  if(mothinf == "infant") return(p + scale_x_continuous(breaks = seq(0, 6)))
+}
+```
+
+### Stacked area chart for infants
+```{R}
+input_df_inf <- get_relabu(stacked_inf)
+genus_stacked(input_df_inf, best_genus_mi)
+ggsave(filename = "PaperFigs/stacked_area_infants.png",
+       width = 6, height = 4, units = "in",
+       scale = 1)
+```
+
+### Stacked area chart for moms
+```{R}
+# Create plot
+input_df_mom <- get_relabu(stacked_mom)
+genus_stacked(input_df_mom, best_genus_mi, mothinf = "mother")
+ggsave(filename = "PaperFigs/stacked_area_mothers.png",
+       width = 6, height = 4, units = "in",
+       scale = 1)
+```
+
+## Alluvial plot
+
+```{R}
+plot_alluvial <- function(input_df, MI, genus_inp) {
+  p <- input_df %>%
+    mutate(Genus = factor(genus, levels = genus_inp)) %>%
+    # Get into alluvial format
+    select(HIVStatus, timepoint, Genus, `Relative abundance`) %>%
+    ggplot(aes(y = `Relative abundance`, x = timepoint, alluvium = Genus)) +
+    ggalluvial::geom_alluvium(aes(fill = Genus, color = Genus),
+                              width = 1/4, alpha = 0.7, decreasing = FALSE) +
+    scale_fill_manual(values = usepalette) +
+    scale_color_manual(values = usepalette) +
+    theme_classic() +
+    facet_grid(rows = vars(HIVStatus)) +
+    labs(x = "Time point", y = "Relative abundance",
+         title = "Relative abundance of genera over time",
+         subtitle = MI)
+  if(MI == "Mother") return(p + scale_x_continuous(breaks = c(0, 6)))
+  if(MI == "Infant") return(p + scale_x_continuous(breaks = seq(0, 6)))
+}
+```
+
+### Alluvial plot for infants
+```{R}
+
+plot_alluvial(input_df_inf, "Infant", genus_inp = best_genus_mi)
+ggsave(filename = "PaperFigs/alluvial_genus_infant.png",
+       width = 6, height = 4, units = "in",
+       scale = 1)
+```
+
+### Alluvial plot for moms
+```{R}
+plot_alluvial(input_df_mom, "Mother", genus_inp = best_genus_mi)
+ggsave(filename = "PaperFigs/alluvial_genus_mother.png",
+       width = 6, height = 4, units = "in",
+       scale = 1)
+```
+
+# Modeling
+
+## Log CPM genus
+```{R}
+# Organize the data
+logCPM_genus <- SummarizedExperiment::assay(microbe_mi, "counts") %>%
+    as.data.frame() %>%
+  animalcules::upsample_counts(tax_table_mi, "genus") %>%
+  animalcules::counts_to_logcpm() %>%
+  as.data.frame()
+```
+
+## Create long format dataframe
+
+```{R create long}
+create_long <- function(input_df, sam_tab = sam_table_mi) {
+  input_df %>%
+    rownames_to_column(var = "taxon") %>%
+    pivot_longer(cols = starts_with("X"),
+                 names_to = "Sample", values_to = "Abundance") %>%
+    left_join(., sam_tab, by = "Sample") %>%
+    return()
+}
+```
+
+## Checking assumptions - histograms 
+
+(Both infants/mothers)
+```{R}
+# Log CPM histogram
+logCPM_genus %>%
+  rownames_to_column(var = "genus") %>%
+  pivot_longer(logCPM_genus, cols = starts_with("X"), names_to = "Sample") %>%
+    ggplot(aes(x = value)) +
+    geom_histogram(bins = 30) +
+    labs(x = "Abundance", y = "log CPM",
+         title = "Histogram of Abundance by Genus (Infants)",
+         subtitle = "Log counts per million (CPM)") +
+    facet_wrap(~genus) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(filename = "PaperFigs/hist_justification_logcpm.png",
+       width = 5, height = 4, units = "in",
+       scale = 1)
+
+# Log CPM histogram
+animalcules::upsample_counts(counts_table_raw, tax_table_mi, "genus")  %>%
+  rownames_to_column(var = "genus") %>%
+  pivot_longer(logCPM_genus, cols = starts_with("X"), names_to = "Sample") %>%
+    ggplot(aes(x = value/10000)) +
+    geom_histogram(bins = 30) +
+    labs(x = "Abundance (tens of thousands)", y = "Count",
+         title = "Histogram of abundance by genus (infants)",
+         subtitle = "Counts/10000") +
+    facet_wrap(~genus) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(filename = "PaperFigs/hist_justification_rawcounts.png",
+       width = 5, height = 4, units = "in",
+       scale = 1)
+```
+
+## Generalized Estimating Equations
+- Run an independent GEE model for each taxa with relative abundance
+- Works well with small data - multiple subpoints/subjects across clusters
+
+https://data.library.virginia.edu/getting-started-with-generalized-estimating-equations/
+
+### Functions to implement GEEs
+```{R gee function}
+test_models_gee <- function(tn, input_df, plot = FALSE) {
+  filt_df <- input_df %>% filter(taxon == tn) %>%
+    mutate(Subject = as.factor(Subject)) %>%
+    arrange(Subject)
+  complex <- geeglm(Abundance ~ 1 + HIVStatus + timepoint + HIVStatus*timepoint,
+                    id = Subject, data = filt_df,
+                    na.action = na.omit, family = "gaussian",
+                    corstr = "ar1")
+  sum_comp <- summary(complex)
+  all_ci <- broom:::confint.geeglm(complex)
+  if (plot) {
+    # HIV Status, but timepoint is also visible
+     p <- plot(ggeffects::ggemmeans(complex, terms = c("timepoint", "HIVStatus"))) + 
+       ggplot2::labs(subtitle = "Estimated marginal means",
+                     title = str_replace(tn, "_", " ")) +
+       ylab("Taxon abundance (log CPM)") +
+       xlab("Time point") +
+      ggplot2::theme_classic()
+     ggplot2::ggsave(filename = paste("PaperFigs/gee/", tn, ".png", sep = ""),
+                     p, width = 6, height = 4, units = "in", scale = 0.7)
+    return()
+  }
+  return(c(timepoint_p = sum_comp$coefficients$`Pr(>|W|)`[3],
+           time_beta = sum_comp$coefficients$Estimate[3],
+           time_beta_2.5 = all_ci["timepoint", "lwr"],
+           time_beta_97.5 = all_ci["timepoint", "upr"],
+           HIVStatus_p = sum_comp$coefficients$`Pr(>|W|)`[2],
+           HIV_beta = sum_comp$coefficients$Estimate[2],
+           HIV_beta_2.5 = all_ci["HIVStatusHIV", "lwr"],
+           HIV_beta_97.5 = all_ci["HIVStatusHIV", "upr"],
+           interaction_p = sum_comp$coefficients$`Pr(>|W|)`[4],
+           interaction_beta = sum_comp$coefficients$Estimate[4],
+           interaction_beta_2.5 = all_ci["HIVStatusHIV:timepoint", "lwr"],
+           interaction_beta_97.5 = all_ci["HIVStatusHIV:timepoint", "upr"]
+           ))
+}
+
+save_table <- function(input_df = results_species,
+                       fileout = "PaperFigs/species_us_gee.csv") {
+  input_df %>%
+  select("Timepoint Unadjusted p-values" = timepoint_p,
+         "Timepoint Coefficient Estimate" = time_beta,
+         "Timepoint Adjusted p-values" = adj_timepoint,
+         "HIV Status Unadjusted p-values" = HIVStatus_p, 
+         "HIV Status Coefficient Estimate" = HIV_beta,
+         "HIV Status Adjusted p-values" = adj_HIVStatus,
+         "Interaction Unadjusted p-values" = interaction_p, 
+         "Interaction Coefficient Estimate" = interaction_beta,
+         "Interaction Adjusted p-values" = adj_interaction) %>%
+  round(., 4) %>%
+  write.csv(., fileout)
+}
+
+plot_hist <- function(input_vec, ...) {
+  qplot(input_vec, geom = "histogram", bins = 30) + 
+    labs(y = "Count", title = "Histogram of p-values",
+         x = "p-values", ...) +
+    theme_bw()
+}
+```
+
+```{R}
+run_model <- function(logcpm_tab, to_plot = TRUE) {
+    input_df <- logcpm_tab %>%
+    filter(MothChild == "Infant") %>%
+    group_by(Subject, HIVStatus, timepoint, taxon) %>% 
+    dplyr::summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+    arrange(timepoint)
+  all_tn <- unique(input_df$taxon)
+  n <- length(all_tn)
+  
+  # Plot model coefficients
+    # If emmeans doesn't work, may need to step through function
+    # and make one plot
+  if (to_plot) lapply(all_tn, test_models_gee, input_df = input_df, plot = TRUE)
+  
+  storage <- t(sapply(all_tn, test_models_gee, input_df = input_df)) %>%
+    as_tibble %>%
+    mutate(adj_timepoint = p.adjust(timepoint_p, method = "bonferroni"),
+           adj_HIVStatus = p.adjust(HIVStatus_p, method = "bonferroni"),
+           adj_interaction = p.adjust(interaction_p, method = "bonferroni")) %>%
+    relocate(contains("HIV"), contains("time"), contains("interaction")) %>%
+    as.data.frame() %>%
+    magrittr::set_rownames(all_tn)
+  
+  #plot_hist(storage$HIVStatus, subtitle = "HIVStatus")
+  #plot_hist(storage$timepoint, subtitle = "Timepoint")
+  kable(storage, caption = 
+          "P-values for the effect of time and HIV status on abundance",
+        row.names = TRUE)
+  return(storage)
+}
+```
+
+### Modeling genera
+```{R}
+# Input: create long version of CPM (both moms and infants)
+long_lcpm_genus <- create_long(logCPM_genus)
+
+# Get genus-level results
+results_genus <- run_model(long_lcpm_genus)
+save_table(results_genus, "PaperFigs/genus_ar1_gee.csv")
+
+# Bonferroni cutoff - genus
+0.05/nrow(results_genus)
+```
+
+
+### Modeling species
+```{R}
+# Input: create long version of CPM (both moms and infants)
+long_lcpm_species <- create_long(counts_logcpm_mi)
+
+# Top species (more than 1%)
+filt <- animalcules::counts_to_relabu(counts_table_raw) |>
+  apply(1, function(x) round(mean(x), 3)) %>%
+  .[. > 0.01]
+  ## Remove any species that are general "sp." or "Other"
+ind <- stringr::str_detect(names(filt), "_sp.|Other")
+species_to_test <- names(filt[!ind])
+
+# Get species-level results
+results_species <- long_lcpm_species %>%
+  filter(taxon %in% species_to_test) %>%
+  run_model()
+save_table(results_species, "PaperFigs/species_ar1_gee.csv")
+
+# Bonferroni cutoff - genus
+0.05/nrow(results_species)
+```
+
+# Testing
+
+## Number of samples available per timepoint
+```{R paired infants Hotelling}
+# Hotelling test for infant pairings (HIV vs. Controls) by species Abundance
+# Note: some infants are missing timepoints
+
+# Have to enter this manually
+matched <- matrix(c("0554", "0469",
+                    "0620", "0507",
+                    "0645", "0539",
+                    "0749", "0718",
+                    "0798", "0801",
+                    "0850", "0839",
+                    "0895", "0878",
+                    "0915", "0890",
+                    "0987", "1040",
+                    "1095", "1049"),
+                  dimnames = list(c(), c("HIV", "Control")),
+                  byrow = TRUE, ncol = 2)
+
+# Add pairings to table
+sam_table_mi_groups <- matched %>%
+  as_tibble() %>%
+  mutate(pairing = seq_len(nrow(matched))) %>%
+  pivot_longer(cols = c(HIV, Control), names_to = c("HIVStatus"),
+               values_to = "Subject") %>%
+  mutate(Subject = paste(Subject, "-1", sep = "")) %>%
+  full_join(sam_table_mi, ., by = c("Subject", "HIVStatus"))
+```
+
+### How many timepoints available per subject?
+```{R}
+sam_table_mi_groups %>% 
+  filter(MothChild == "Infant") %>%
+  group_by(timepoint, pairing) %>%
+  dplyr::summarise(out = n()) %>%
+  mutate(new = (out == 2)) %>% # num infant pairs
+  dplyr::summarise(sum(new))
+sam_table_mi_groups %>% 
+  filter(MothChild == "Mother") %>%
+  group_by(timepoint) %>%
+  dplyr::summarise(n())
+```
+
+### Which infants/moms are missing timepoints?
+```{R}
+sam_table %>%
+  group_by(Subject) %>%
+  summarize(count = n()) %>%
+  group_by(count) %>%
+  summarize(n())
+
+# A tibble: 4 × 2
+# num timepoints || how many infants
+# <int> <int>
+# 2     1
+# 3     1
+# 6     2
+# 7    16
+```
+
+### How many infants per timepoint?
+```{R}
+sam_table %>%
+  group_by(timepoint) %>%
+  summarize(count = n()) 
+```
+
+### How many mothers per timepoint?
+```{R}
+sam_table_mi %>%
+  filter(MothChild == "Mother") %>%
+  group_by(Subject) %>%
+  summarize(count = n()) %>%
+  group_by(count) %>%
+  summarize(n())
+```
+
+## Paired multivariate Hotelling's T-squared
+
+```{r Hotelling main function}
+# Hotelling's T^2 Multivariate function
+# Source: https://online.stat.psu.edu/stat505/lesson/7/7.1/7.1.4
+  # Example: https://online.stat.psu.edu/stat505/lesson/7/7.1/7.1.9
+  # Null hypothesis: population mean vectors are equal
+  #  Alternative: mean vectors are not equal
+
+Hotelling_mv_T2 <- function(tmp, Group1, Group2){
+  # Rename groups
+  tmp %<>% select(pairing,
+                  Taxon = "taxon",
+                  Group1 = starts_with(Group1),
+                  Group2 = starts_with(Group2))
+  # Define n
+  all_pairs <- unique(tmp$pairing)
+  n <- length(all_pairs)
+  p <- length(unique(tmp$Taxon))
+  # Sample mean vector
+  Y_i <- tmp %>%
+    group_by(pairing, Taxon) %>%
+    dplyr::summarise(Yi = Group1 - Group2,
+                     .groups = "drop")
+  Ybar <- Y_i %>%
+    group_by(Taxon) %>%
+    dplyr::summarise(Ybar = mean(Yi),
+                     .groups = "drop")
+  # Y_i - Ybar
+  diff <- Y_i %>%
+    left_join(., Ybar, by = "Taxon") %>%
+    group_by(pairing, Taxon) %>%
+    dplyr::summarise(diff = Yi - Ybar, .groups = "drop")
+  # (y_i-Ybar)%*%(y_i-Ybar)'
+  mult_func <- function(x) {
+    vec <- t(t(diff$diff[diff$pairing == x]))
+    vec %*% t(vec)
+  }
+  # Calculate S_Y
+  # Sample Var-cov matrix of vecs Y_i
+  S_Y <- 1/(n - 1) * Reduce("+", lapply(all_pairs, mult_func))
+  # Calculate T^2
+  # T^2 = n*Ybar'*inv(S_Y)*Ybar
+  Ybar_v <- t(t(Ybar$Ybar))
+  T_2 <- n * t(Ybar_v) %*% solve(S_Y) %*% Ybar_v
+  #F statistic
+  # Dist according to F_p,n-p
+  F_stat <- (n - p) / (p * (n - 1)) * T_2
+  # Reject H0 at alpha if F-val exceeds
+  df1 <- p
+  df2 <- n - p
+  crit_F <- qf(0.95, df1, df2)
+  pval <- 1 - pf(c(F_stat), df1, df2)
+  
+  # Conduct a paired t-test
+  # Following # 1 in R&C pg. 140
+  if(pval < 0.05) {
+    ttest_paired <- function(tax) {
+      for_testing <- tmp %>% filter(Taxon == tax)
+      out_test <- t.test(x = for_testing$Group1, y = for_testing$Group2,
+                         alternative = "two.sided",
+                         paired = TRUE, var.equal = TRUE)
+      output <- list(t = as.numeric(out_test$statistic), df = as.numeric(out_test$parameter),
+                  diff_means = as.numeric(out_test$estimate), CI_2.5 = as.numeric(out_test$conf.int[1]),
+                  CI_97.5 = as.numeric(out_test$conf.int[2]), "p-value" = as.numeric(out_test$p.value))
+      return(lapply(output, base::round, digits = 4))
+    }
+    results <- sapply(unique(tmp$Taxon), ttest_paired)
+    results <- rbind(results, "adj p-value" = p.adjust(results["p-value", ],
+                                                       method = "bonferroni"))
+    write.csv(results, "PaperFigs/pairedttest_HIV_mothinf.csv")
+    message("Results from t-tests:")
+    print(results)
+  }
+  
+  return(list(df1 = df1, df2 = df2, crit_F = crit_F,
+              F_stat = F_stat[1], pvalue = pval))
+}
+```
+
+### Paired mom-infant duads
+
+Note that this is using genera...
+
+```{R mothers vs infants}
+conduct_hotelling_HIV_genus <- function(HIV_status, time = 0){
+  message("Running tests for HIV status: ", HIV_status,
+          " And timepoint: ", time)
+  tmp <- create_long(logCPM_genus) %>%
+    filter(timepoint == time,
+           HIVStatus == HIV_status,
+           # To avoid n < p, use top 5-6 species
+           taxon %in% best_genus_mi[1:6]) %>%
+    mutate(pairing = sapply(strsplit(Subject, "-"), function(x) x[1])) %>%
+    select(pairing, MothChild, taxon, Abundance) %>%
+    pivot_wider(., id_cols = c(pairing, taxon), values_from = Abundance,
+                names_from = MothChild) %>%
+    filter(!is.na(Mother) & !is.na(Infant)) %>%
+    arrange(pairing)
+  Hotelling_mv_T2(tmp, "Mother", "Infant")
+}
+
+```
+
+#### t=0
+```{R}
+# time = 0
+results_genus <- sapply(c("HIV", "Control"), conduct_hotelling_HIV_genus, time = 0)
+colnames(results_genus) <- c("HIV", "Control")
+results_genus
+write.csv(results_genus, "PaperFigs/mv_hotelling_inf_moth.csv")
+```
+
+#### t=1
+```{R}
+# time = 6
+results6 <- sapply(c("HIV", "Control"), conduct_hotelling_HIV_genus, time = 6)
+colnames(results6) <- c("HIV", "Control")
+results6
+write.csv(results6, "PaperFigs/mv_hotelling_inf_moth6.csv")
+```
+
+### Paired infants at t=0,...,6
+
+```{R}
+# Function to run Hotelling's T^2 test
+conduct_hotelling_Inf <- function(this_time){
+  tmp <- create_long(logCPM_genus,
+                     sam_tab = sam_table_mi_groups) %>%
+    filter(timepoint == this_time,
+           MothChild == "Infant",
+           # To avoid n < p, use top 5-6 species
+           taxon %in% best_genus[1:6]) %>%
+    select(pairing, HIVStatus, taxon, Abundance) %>%
+    pivot_wider(., id_cols = c(pairing, taxon),
+                values_from = Abundance,
+                names_from = HIVStatus) %>%
+    filter(!is.na(HIV) & !is.na(Control)) %>%
+    arrange(pairing)
+  Hotelling_mv_T2(tmp, "HIV", "Control")
+}
+```
+
+```{R}
+# Obtain results for infants
+results <- sapply(0:6, conduct_hotelling_Inf)
+colnames(results) <- paste("Timepoint", 0:6)
+numeric_results <- round(apply(results, 2, as.numeric), 4)
+rownames(numeric_results) <- rownames(results)
+write.csv(numeric_results, "PaperFigs/hotelling_infonly_timepoints.csv")
+
+# Changing pvalues likely due to lack of time points (see critical value)
+
+```
+
+
+## Unpaired multivariate Hotelling's T-squared
+```{R Hotelling unpaired}
+Hotelling_mv_T2_up <- function(tmp, Populations, Subjects,
+                            taxon = "taxon"){
+  # Sources: https://online.stat.psu.edu/stat505/lesson/7/7.1/7.1.14
+  # Also https://online.stat.psu.edu/stat505/lesson/7/7.1/7.1.15
+  # Null hypothesis: population mean vectors are equal
+  # Alternative: mean vectors are not equal
+  
+  # Rename groups
+  tmp %<>% select(Populations = starts_with(Populations),
+                  Subjects = starts_with(Subjects),
+                  Taxon = starts_with(taxon),
+                  Abundance)
+  Group1 <- unique(tmp$Populations)[1]
+  Sub1 <- tmp %>% filter(Populations == Group1) %>% 
+    distinct(Subjects) %>% ungroup() %>% select(Subjects) %>% unlist()
+  Group2 <- unique(tmp$Populations)[2]
+  Sub2 <- tmp %>% filter(Populations == Group2) %>% 
+    distinct(Subjects) %>% ungroup() %>% select(Subjects) %>% unlist()
+  # Define n
+  n <- tmp %>% group_by(Populations) %>% distinct(Subjects) %>% summarize(n())
+  n1 <- n %>% filter(Populations == Group1) %>% select(`n()`) %>% as.numeric()
+  n2 <- n %>% filter(Populations == Group2) %>% select(`n()`) %>% as.numeric()
+  p <- length(unique(tmp$Taxon))
+  # Sample mean vector
+  X_i <- tmp %>%
+    dplyr::rename(Xi = "Abundance")
+  Xbar <- X_i %>%
+    group_by(Populations, Taxon) %>%
+    dplyr::summarise(Xbar = mean(Xi), .groups = "drop")
+  # X_i - Xbar
+  diff <- X_i %>%
+    left_join(., Xbar, by = c("Populations", "Taxon")) %>%
+    group_by(Subjects, Taxon) %>%
+    dplyr::summarise(diff = Xi - Xbar, .groups = "drop")
+  # (X_ij-Xbar_i)%*%(X_ij-Xbar_i)'
+  mult_func <- function(x) {
+    vec <- t(t(diff$diff[diff$Subjects == x]))
+    vec %*% t(vec)
+  }
+  # Calculate S_p
+  # Sample Var-cov matrix of vecs Y_i
+  S_1 <- 1/(n1 - 1) * Reduce("+", lapply(Sub1, mult_func))
+  S_2 <- 1/(n2 - 1) * Reduce("+", lapply(Sub2, mult_func))
+  S_p <- ((n1 - 1) * S_1 + (n2 - 1) * S_2) / (n1 + n2 - 2)
+  
+  # T^2 = t(Xbar_1-Xbar_2) %*% {S_p(1/n1 + 1/n2)}^-1 %*% (Xbar_1-Xbar_2)
+  Xbar_1 <- Xbar %>% filter(Populations == Group1) %>% select(Xbar)
+  Xbar_2 <- Xbar %>% filter(Populations == Group2) %>% select(Xbar)
+  meandiff <- t(t(Xbar_1 - Xbar_2))
+  T_2 <- t(meandiff) %*% solve(S_p * (1 / n1 + 1 / n2)) %*% meandiff
+  
+  #F statistic
+  # Dist according to F_p, n1 + n2 - p - 1
+  F_stat <- (n1 + n2 - p - 1) / (p * (n1 + n2 - 2)) * T_2
+  # Reject H0 at alpha if F-val exceeds
+  df1 <- p
+  df2 <- n1 + n2 - p - 1
+  crit_F <- qf(0.95, df1, df2)
+  pval <- 1 - pf(c(F_stat), df1, df2)
+  
+  if(pval < 0.05) {
+    ttest_unpaired <- function(tax) {
+      for_testing <- tmp %>% filter(Taxon == tax)
+      out_test <- t.test(Abundance ~ Populations, for_testing,
+                         alternative = "two.sided",
+                         var.equal = FALSE, paired = FALSE)
+      return(list(t = out_test$statistic, df = out_test$parameter,
+                  diff_means = out_test$estimate[1],
+                  CI_2.5 = out_test$conf.int[1],
+                  CI_97.5 = out_test$conf.int[2],
+                  "p-value" = out_test$p.value))
+      }
+    results <- sapply(unique(tmp$Taxon), ttest_unpaired)
+    results <- rbind(results,
+                     "adj p-value" = p.adjust(results["p-value", ],
+                                              method = "bonferroni"))
+    
+    message("Results from t-tests:")
+    print(results)
+  }
+  
+  list(df1 = df1, df2 = df2, crit_F = crit_F,
+       F_stat = F_stat[1], pvalue = pval)
+}
+```
+
+### Unpaired moms comparison
+
+```{R Hotelling mothers only}
+conduct_hotelling_mother <- function(this_time, num_taxa){
+  tmp <- create_long(logCPM_genus) %>%
+    filter(MothChild == "Mother",
+           # Avoid n > p
+           taxon %in% best_genus_m[1:num_taxa],
+           timepoint == this_time) %>%
+    select(taxon, Subject, HIVStatus, Abundance) %>%
+  arrange(Subject)
+  return(Hotelling_mv_T2_up(tmp, "HIVStatus", "Subject", "taxon"))
+}
+```
+
+#### t=0
+```{R}
+# Across all genera
+results_moms0 <- conduct_hotelling_mother(0, 12)
+
+results_moms0
+
+write.csv(results_moms0, "PaperFigs/unpaired_moms_hotelling_t0.csv")
+```
+
+#### t=6
+```{R}
+# Across all genera
+results_moms6 <- conduct_hotelling_mother(6, 12)
+
+results_moms6
+
+write.csv(results_moms6, "PaperFigs/unpaired_moms_hotelling_t6.csv")
+
+# Biggest differences in staph, strep...
+```
+
+## Pathogens in paired moms-infants
+
+```{R}
+# Neiserria meningitidis is <0.1% (in "Other") so I won't test this
+
+times <- c(0, 6)
+hivstat <- c("HIV", "Control")
+species_to_test <- c("Streptococcus_pneumoniae",
+                     "Haemophilus_influenzae",
+                     "Staphylococcus_haemolyticus")
+
+init_table <- tibble(Species = rep(species_to_test,
+                                   each = length(times) * length(hivstat)),
+                     HIVstatus = rep(rep(hivstat,
+                                         each = length(times)),
+                       times = length(species_to_test)),
+                     Timepoint = rep(times, length(species_to_test) *
+                                       length(hivstat)))
+
+testing_species <- function(which_species, which_status, which_time) {
+  to_test <- counts_table_raw_mi %>%
+  counts_to_logcpm() %>%  create_long() %>%
+  filter(taxon == which_species,
+         HIVStatus == which_status,
+         timepoint == which_time) %>%
+  select(Abundance, Subject, MothChild) %>%
+  relocate(Abundance) %>%
+  arrange(Subject) %>%
+  tidyr::separate(Subject, sep = "-", into = c("Subject"), extra = "drop") %>%
+  pivot_wider(., id_cols = Subject, id_expand = FALSE,
+              names_from = MothChild, values_from = Abundance) 
+  output <- t.test(to_test$Mother, to_test$Infant, paired = TRUE,
+                   alternative = "two.sided")
+  print(output)
+  c("p value" = round(output$p.value, 2),
+    "Lower CI" = round(output$conf.int[1], 2),
+    "Upper CI" = round(output$conf.int[2], 2),
+    "Mean of Differences in log counts" = round(unname(output$estimate), 2),
+    "t" = round(unname(output$statistic), 2),
+    "df" = round(unname(output$parameter), 2))
+}
+```
+
+
+```{R}
+# x - y!
+# Conducts tests on mothers - infants
+
+init_table %>%
+  apply(., 1, function(x) testing_species(x[1], x[2], x[3])) %>%
+  t() %>%
+  as_tibble() %>%
+  mutate("Adj P value" = p.adjust(`p value`, method = "bonferroni")) %>%
+  bind_cols(init_table, .) %>%
+  write.csv(., "PaperFigs/pathogens_pairedt.csv", row.names = FALSE)
+
+```

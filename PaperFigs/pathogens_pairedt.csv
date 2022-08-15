@@ -1,0 +1,13 @@
+"Species","HIVstatus","Timepoint","p value","Lower CI","Upper CI","Mean of Differences in log counts","t","df","Adj P value"
+"Streptococcus_pneumoniae","HIV",0,0.03,0.26,3.8,2.03,2.6,9,0.36
+"Streptococcus_pneumoniae","HIV",6,0.16,-3.47,0.73,-1.37,-1.6,6,1
+"Streptococcus_pneumoniae","Control",0,0.12,-0.43,3.28,1.42,1.73,9,1
+"Streptococcus_pneumoniae","Control",6,0.01,-4.86,-0.79,-2.83,-3.2,8,0.12
+"Haemophilus_influenzae","HIV",0,0.84,-1.55,1.87,0.16,0.21,9,1
+"Haemophilus_influenzae","HIV",6,0.38,-3.87,1.7,-1.08,-0.95,6,1
+"Haemophilus_influenzae","Control",0,0.88,-1.18,1.36,0.09,0.15,9,1
+"Haemophilus_influenzae","Control",6,0.01,-2.69,-0.45,-1.57,-3.23,8,0.12
+"Staphylococcus_haemolyticus","HIV",0,0.03,-4.36,-0.27,-2.31,-2.56,9,0.36
+"Staphylococcus_haemolyticus","HIV",6,0.4,-0.94,2.06,0.56,0.91,6,1
+"Staphylococcus_haemolyticus","Control",0,0.01,-3.02,-0.61,-1.81,-3.41,9,0.12
+"Staphylococcus_haemolyticus","Control",6,0.27,-0.52,1.6,0.54,1.17,8,1

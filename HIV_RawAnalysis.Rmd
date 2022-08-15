@@ -1,0 +1,352 @@
+---
+title: "Raw Counts Analysis"
+author: "Aubrey Odom-Mabey"
+date: "1/19/2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+    toc_depth: 6
+    number_sections: true
+    code_folding: hide
+---
+## Setup
+```{r setup}
+suppressPackageStartupMessages({
+  # General use
+  library(tidyverse)
+  library(knitr)
+  library(magrittr)
+  # Data formats
+  library(animalcules)
+  library(MultiAssayExperiment)
+  library(SummarizedExperiment)
+  # Modeling
+  library(lme4)
+  library(geepack)
+})
+```
+
+## Initial Data Extraction
+```{r plotting}
+# Read in MAE of data
+OG_dat <- readRDS("data/animalculesFinalHIV.rds")
+dat <- OG_dat[["MicrobeGenetics"]]
+
+# Extract metadata for infants only
+microbe <- dat[, which(dat$MothChild == "Infant")]
+sam_table <- as.data.frame(colData(microbe))
+
+# Both mothers and infants
+microbe_mi <- dat
+tax_table <- as.data.frame(SummarizedExperiment::rowData(microbe))
+
+# Extract metadata, taxonomic info, and counts
+tax_table_mi <- as.data.frame(SummarizedExperiment::rowData(microbe_mi))
+sam_table_mi <- as.data.frame(SummarizedExperiment::colData(microbe_mi))
+counts_table_mi <- as.data.frame(SummarizedExperiment::assay(
+  microbe_mi, "MGX"))[, rownames(sam_table_mi)]
+```
+
+## Statistics
+The following statistics are calculated specifically for the infants in this study (HIV-E vs control infants).
+
+### Information for mothers' and infants' samples (using raw reads)
+
+```{R sample info on ages}
+sam_table_mi %>%
+  filter(MothChild == "Infant") %>%
+  dplyr::group_by(timepoint) %>%
+  dplyr::summarise("Average Infant Age" = round(mean(Age)),
+                   "SD of Infant Age" = round(sd(Age)))
+```
+
+```{r table1}
+sam_table_mi %>%
+  dplyr::rename("HIV Status" = HIVStatus) %>%
+  mutate("Timepoint" = factor(timepoint)) %>%
+  table1::table1(~ Timepoint + `HIV Status` | factor(MothChild),
+               data = .)
+```
+
+### Read counts
+```{R}
+reads_tbl <- counts_table_mi %>%
+  as_tibble() %>%
+  mutate(species = tax_table_mi$species) %>%
+  relocate(species) %>%
+  pivot_longer(cols = starts_with("X"),
+               names_to = "Sample", values_to = "Abundance") %>%
+  left_join(., sam_table_mi, by = "Sample") %>%
+  group_by(HIVStatus, MothChild, Sample) %>%
+  dplyr::summarise("Total Reads" = sum(`Abundance`)) %>%
+  arrange(desc(`Total Reads`))
+
+reads_tbl %>%
+  ungroup(HIVStatus) %>%
+    dplyr::summarise(med_reads = median(`Total Reads`),
+                     mean_reads = mean(`Total Reads`),
+                     sd_reads = sd(`Total Reads`),
+                     min_reads = min(`Total Reads`),
+                     max_reads = max(`Total Reads`),
+                     num_total = n())
+
+reads_tbl %>%
+    dplyr::summarise(med_reads = median(`Total Reads`),
+                     mean_reads = mean(`Total Reads`),
+                     sd_reads = sd(`Total Reads`),
+                     min_reads = min(`Total Reads`),
+                     max_reads = max(`Total Reads`),
+                     num_total = n())
+```
+
+#### Comparing read counts
+```{R}
+reads_tbl %>%
+  as.data.frame() %>%
+  t.test(`Total Reads` ~ MothChild, data = ., paired = FALSE,
+       alternative = "greater")
+```
+
+### Infant ages at timepoints
+```{R}
+sam_table %>%
+  group_by(timepoint) %>%
+  dplyr::summarise(median(`Age`))
+# Number of mother samples
+# Number of samples' reads
+```
+
+## Percent abundances of taxa
+```{R create long}
+create_long <- function(input_df, sam_tab = sam_table_mi,
+                        tax_tab = tax_table_mi) {
+  input_df %>%
+    as_tibble() %>%
+    mutate(species = tax_table_mi$species) %>%
+    relocate(species) %>%
+    pivot_longer(cols = starts_with("X"),
+                 names_to = "Sample", values_to = "Abundance") %>%
+    left_join(., sam_tab, by = "Sample") %>%
+    left_join(., tax_tab, by = "species") %>%
+    relocate(colnames(sam_tab))
+}
+
+alluvial_df <- create_long(counts_table_mi)
+
+``` 
+
+### Abundances of different taxons
+
+```{R percent abundance}
+
+# Non-limited to any groupings, all samples!
+alluvial_df %>%
+  group_by(genus) %>%
+  summarise(pct = round(sum(Abundance)/sum(alluvial_df$Abundance)*100, 4)) %>%
+  arrange(desc(pct))
+
+alluvial_df %>%
+  group_by(phylum) %>%
+  summarise(pct = round(sum(Abundance)/sum(alluvial_df$Abundance)*100, 4)) %>%
+  arrange(desc(pct))
+```
+
+
+
+## Beta Diversity Testing
+
+### Genus - Infant
+```{R}
+# Genus
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Infant" &
+                                     OG_dat$timepoint == 0)),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard
+                    input_select_beta_condition = "HIVStatus",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+```
+
+```{R}
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Infant" &
+                                     OG_dat$timepoint == 6)),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard
+                    input_select_beta_condition = "HIVStatus",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+
+#animalcules::diversity_beta_boxplot(subsetByColData(OG_dat,
+#                               which(OG_dat$MothChild == "Infant")),
+#                    tax_level = "genus",
+#                    input_beta_method = "bray", #jaccard
+#                    input_select_beta_condition = "HIVStatus")
+```
+
+### Genus - Mother
+```{R}
+# Genus
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Mother" &
+                                     OG_dat$timepoint == 0)),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard 
+                    input_select_beta_condition = "HIVStatus",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+```
+
+```{R}
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Mother" &
+                                     OG_dat$timepoint == 6)),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard 
+                    input_select_beta_condition = "HIVStatus",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+
+
+#animalcules::diversity_beta_boxplot(subsetByColData(OG_dat,
+#                               which(OG_dat$MothChild == "Mother")),
+#                    tax_level = "genus",
+#                    input_beta_method = "bray", #jaccard
+#                    input_select_beta_condition = "HIVStatus")
+```
+
+### Genus - HEU infants t=0 vs t=6
+```{R}
+# Genus
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Infant" &
+                                     OG_dat$HIVStatus == "HIV" &
+                                     OG_dat$timepoint %in% c(0, 6))),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard 
+                    input_select_beta_condition = "timepoint",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+
+#animalcules::diversity_beta_boxplot(subsetByColData(OG_dat,
+#                               which(OG_dat$MothChild == "Mother")),
+#                    tax_level = "genus",
+#                    input_beta_method = "bray", #jaccard
+#                    input_select_beta_condition = "HIVStatus")
+```
+
+
+### Genus - HUU infants t=0 vs t=6
+```{r}
+diversity_beta_test(subsetByColData(OG_dat,
+                               which(OG_dat$MothChild == "Infant" &
+                                     OG_dat$HIVStatus == "Control" &
+                                     OG_dat$timepoint %in% c(0, 6))),
+                    tax_level = "genus",
+                    input_beta_method = "bray", #jaccard 
+                    input_select_beta_condition = "timepoint",
+                    input_select_beta_stat_method = "Wilcoxon rank sum test")
+
+```
+
+## Plotting
+
+### Obtain most abundant genera
+```{R}
+obtain_gn <- function(counts_tab, tax_tab) {
+  all_relabu_genus <- counts_tab |>
+    as.matrix() |>
+    # Get rel abu within samokes
+    prop.table(margin = 2) |>
+    as_tibble() |>
+    bind_cols(genus = tax_tab$genus) |>
+    relocate(genus) |>
+    group_by(genus) |>
+    # Sum rel abu within samples/columns for genera
+    summarise(across(.fns = sum)) %>%
+    # Sum everything but the first columm ("genus")
+    mutate(allmeans = apply(.[,-1], 1, mean)) |>
+    select(genus, allmeans) |>
+    mutate(genus = replace(genus, is.na(genus), "Unknown")) |>
+    arrange(desc(allmeans))
+  
+  all_relabu_genus |>
+    select(genus) |> unlist() |> unname() %>% .[1:20] %>%
+    return()
+}
+
+ind <- microbe_mi$MothChild == "Infant"
+best_genus <- obtain_gn(counts_table_mi[, ind], tax_table)
+ind <- microbe_mi$MothChild == "Mother"
+best_genus_m <- obtain_gn(counts_table_mi[, ind], tax_table_mi)
+```
+
+### Infants
+```{r barplots control genus}
+# Barplot for Control
+p <- relabu_barplot(subsetByColData(OG_dat,
+                               which(OG_dat$HIVStatus == "Control" &
+                                       OG_dat$MothChild == "Infant")),
+               tax_level = "genus",
+               order_organisms = best_genus[1:20],
+               sort_by = "conditions",
+               group_samples = TRUE,
+               group_conditions = "timepoint",
+               show_legend = TRUE)
+
+#plotly::export(p, file = "PaperFigs/RAW_barplot_control_inf.png",
+#                   vwidth = 750, vheight = 550)
+p
+```
+
+```{r barplots HIV-E genus}
+# Barplot for Control
+p <- relabu_barplot(subsetByColData(OG_dat,
+                               which(OG_dat$HIVStatus == "HIV" &
+                                       OG_dat$MothChild == "Infant")),
+               tax_level = "genus",
+               order_organisms = best_genus[1:20],
+               sort_by = "conditions",
+               group_samples = TRUE,
+               group_conditions = "timepoint",
+               show_legend = TRUE)
+
+#plotly::export(p, file = "PaperFigs/RAW_barplot_HIV_inf.png",
+#                   vwidth = 750, vheight = 550)
+p
+```
+
+### Mothers
+```{r barplots control genus moms}
+# Barplot for Control
+p <- relabu_barplot(subsetByColData(OG_dat,
+                               which(OG_dat$HIVStatus == "Control" &
+                                       OG_dat$MothChild == "Mother")),
+               tax_level = "genus",
+               order_organisms = best_genus_m[1:20],
+               sort_by = "conditions",
+               group_samples = TRUE,
+               group_conditions = "timepoint",
+               show_legend = TRUE)
+
+#plotly::export(p, file = "PaperFigs/RAW_barplot_control_mom.png",
+#                   vwidth = 750, vheight = 550)
+p
+```
+
+```{r barplots HIV-E genus mom}
+# Barplot for Control
+p <- relabu_barplot(subsetByColData(OG_dat,
+                               which(OG_dat$HIVStatus == "HIV" &
+                                       OG_dat$MothChild == "Mother")),
+               tax_level = "genus",
+               order_organisms = best_genus_m[1:20],
+               sort_by = "conditions",
+               group_samples = TRUE,
+               group_conditions = "timepoint",
+               show_legend = TRUE)
+
+#plotly::export(p, file = "PaperFigs/RAW_barplot_HIV_mom.png",
+#                   vwidth = 750, vheight = 550)
+p
+```
+
+
+

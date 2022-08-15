@@ -1,0 +1,179 @@
+---
+title: "Formatting data"
+author: "Aubrey Odom"
+date: '2022-05-24'
+output: html_document
+---
+
+# Setup
+```{R}
+suppressPackageStartupMessages({
+  # General use
+  library(tidyverse)
+  library(knitr)
+  library(magrittr)
+  # Data formats
+  library(animalcules)
+  library(MultiAssayExperiment)
+  library(SummarizedExperiment)
+})
+```
+
+# 16S microbe abundances
+
+The purpose of this code is to take the final formatted Multi-Assay Experiment output by Animalcules and label as "Other" all the taxons belonging to genera that represent <1% average relative abundances across samples. 
+
+The resulting data object is a SummarizedExperiment object saved as "FinalDatOther.rds"
+
+## Initial data extraction
+```{r plotting}
+# Read in MAE of data
+OG_dat <- readRDS("animalculesFinalHIV.rds")
+dat <- OG_dat[["MicrobeGenetics"]]
+
+# Extract metadata for infants only
+microbe <- dat[, which(dat$MothChild == "Infant")]
+sam_table <- as.data.frame(colData(microbe))
+
+# Both mothers and infants
+microbe_mi <- dat
+
+# Extract metadata, taxonomic info, and counts
+tax_table_mi <- as.data.frame(SummarizedExperiment::rowData(microbe_mi))
+sam_table_mi <- as.data.frame(SummarizedExperiment::colData(microbe_mi))
+counts_table_mi <- as.data.frame(SummarizedExperiment::assay(
+  microbe_mi, "MGX"))[, rownames(sam_table_mi)]
+```
+
+## Identify species < 0.01 average relative genus abundance as other
+```{R}
+# Extract metadata, taxonomic informtation, and counts
+#tax_table_mi
+#sam_table_mi
+
+all_relabu_genus <- counts_table_mi |>
+  as.matrix() |>
+  # Get rel abu within samokes
+  prop.table(margin = 2) |>
+  as_tibble() |>
+  bind_cols(genus = tax_table_mi$genus) |>
+  relocate(genus) |>
+  group_by(genus) |>
+  # Sum rel abu within samples/columns for genera
+  summarise(across(.fns = sum)) %>%
+  # Sum everything but the first columm ("genus")
+  mutate(allmeans = apply(.[,-1], 1, mean)) |>
+  select(genus, allmeans) |>
+  mutate(genus = replace(genus, is.na(genus), "Unknown")) |>
+  arrange(desc(allmeans)) |>
+  mutate(lessthan1pct = allmeans < 0.01)
+
+# Identify species in other
+othergenera <- all_relabu_genus %>%
+  filter(lessthan1pct == TRUE) |>
+  select(genus) |> unlist() |> unname()
+
+```
+
+## Use the identified species to update the tax, species tables
+```{R}
+# Replace tax table
+tax_table_mi_other <- tax_table_mi |>
+  mutate(genus = replace(genus, is.na(genus), "Unknown"),
+         species = replace(species, genus %in% othergenera, "Other"),
+         genus = replace(genus, genus %in% othergenera, "Other"))
+
+# Replace species with "others"
+ind <- tax_table_mi_other$species == "others"
+tax_table_mi_other$species[ind] <- paste(tax_table_mi_other$genus[ind],
+                                         "sp.", sep = "_")
+
+# Resum the counts table
+counts_mi_other <- counts_table_mi |>
+  bind_cols(species = tax_table_mi_other$species) |>
+  group_by(species) |>
+  summarise(across(.fns = sum)) |> as.data.frame()
+
+rownames(counts_mi_other) <- counts_mi_other$species
+counts_mi_other %<>% select(-c(species))
+
+# Adjust tax table accordingly
+tax_table_mi_other <- tax_table_mi_other %>%
+  distinct(species, .keep_all = TRUE) %>%
+  arrange(species)
+
+rownames(tax_table_mi_other) <- tax_table_mi_other$species
+
+```
+
+## Create SE object
+```{R}
+microbe_other <- SummarizedExperiment(
+  assays = list(counts = counts_mi_other),
+  rowData = tax_table_mi_other, colData = sam_table_mi)
+
+# Add assays using TBSP
+dat <- TBSignatureProfiler::mkAssay(microbe_other, log = TRUE, 
+                                    counts_to_CPM = TRUE,
+                                    input_name = "counts")
+
+saveRDS(dat, file = "FinalDatOther.RDS")
+```
+
+# PICRUSt2 Data
+
+## Processing raw data
+```{R}
+# Read in PICRUSt 2 predicted data
+stempath <- paste0("/restricted/projectnb/infant-microbiome/work/aodom/",
+                   "HIV_Exposed_Infants/picrust2_work")
+ext <- "pathways_out/path_abun_unstrat_descrip.tsv"
+
+all_comb <- c("mom_con", "mom_hiv", "inf_con", "inf_hiv")
+read_in <- function(x) read_delim(paste(stempath, paste0("picrust2_", x),
+                                        ext, sep = "/"), delim = "\t",
+                                  show_col_types = FALSE)
+picrust_output <- lapply(all_comb, read_in)
+
+# Merge all files
+  # I should have ran them all together... :)
+these_col <- c("pathway", "description")
+merged1 <- full_join(picrust_output[[1]], picrust_output[[2]], by = these_col)
+merged2 <- full_join(picrust_output[[3]], picrust_output[[4]], by = these_col)
+merged3 <- full_join(merged1, merged2, by = these_col)
+merged3[is.na(merged3)] <- 0
+
+# Separate counts and pathway information
+paths_table <- merged3 %>% select(all_of(these_col)) %>%
+  as.data.frame() %>% magrittr::set_rownames(val = .$pathway)
+pathway_counts <- merged3 %>% select(-these_col) %>%
+  as.data.frame() %>% magrittr::set_rownames(val = paths_table$pathway)
+
+# Rename columns as samples
+rename_func <- function(x) stringr::str_split(
+  x, pattern = "_", n = 2)[[1]][1] %>%
+  paste0("X", .)
+colnames(pathway_counts) <- sapply(colnames(pathway_counts), rename_func)
+
+# Make sure the columns are in same order as metadata
+ind <- match(rownames(sam_table_mi), colnames(pathway_counts))
+pathway_counts <- pathway_counts[, ind]
+```
+
+## Create SE object
+```{R}
+microbe_picrust <- SummarizedExperiment(
+  assays = list(counts = pathway_counts),
+  rowData = paths_table, colData = sam_table_mi)
+
+# Add assays using TBSP
+dat_picrust <- TBSignatureProfiler::mkAssay(microbe_picrust, log = TRUE, 
+                                    counts_to_CPM = TRUE,
+                                    input_name = "counts")
+
+saveRDS(dat_picrust, file = "FinalDatPICRUSt2.RDS")
+
+```
+
+
+

@@ -1,0 +1,85 @@
+---
+title: "HIV Analysis - Data Cleaning"
+author: "Aubrey Odom"
+date: "May 2022"
+output:
+    html_document:
+      toc: true
+      toc_depth: 2
+      number_sections: true
+      code_folding: hide
+---
+
+# Setup
+
+```{R setup, message = FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+```
+
+# Clean Metadata
+
+## Only keep samples in analysis
+```{R}
+# All names of samples for the analysis
+sample_names <- read_delim("preclean_MetaData.txt", delim = "\t") %>%
+  .[-1,] %>%
+  filter(Priority == "02-HIV") %>%
+  mutate(SampleID = as.numeric(`#SampleID`)) %>%
+  select(SampleID, Subject)
+
+# Only keep samples that match these
+mapping <- read_csv("mappingFaits.csv", show_col_types = FALSE)[, -1] %>%
+  filter(Sample %in% paste0("X", sample_names$SampleID)) %>%
+  select(-c(Symptoms, InfectionStatus, Experiment, PrePostSympt))
+
+```
+
+## Fix timepoints
+```{R}
+# Fix timepoints (infant and mothers)
+mapping$timepoint[mapping$Sample == "X12136"] <- 5
+mapping$timepoint[mapping$Sample == "X11220"] <- 4 # Marked as 5
+# Impute age with median
+to_impute <- unlist(mapping[mapping$timepoint == 5 & mapping$Age != 9999, 'Age'])
+mapping$Age[mapping$Sample == "X12136"] <- 90
+```
+
+## Fix mothers' timepoints
+```{R}
+# Identify the samples' chronology as which timepoint
+mother_timepoints <- mapping %>%
+  filter(MothChild == "Mother") %>%
+  group_by(Subject) %>%
+  distinct(Sample) %>%
+  mutate(Sample_n = sapply(strsplit(Sample, "X"), function(x) x[2]),
+         Sample_n = as.numeric(Sample_n)) %>%
+  arrange(Subject, Sample_n) %>%
+  mutate(timepoint = as.numeric(duplicated(Subject))) %>%
+  select(Subject, Sample, timepoint)
+ind <- c(na.omit(match(mother_timepoints$Sample, mapping$Sample)))
+mapping$timepoint[ind] <- replace(mother_timepoints$timepoint,
+                                     mother_timepoints$timepoint == 1, 6)
+```
+
+## Look at immunizations
+```{R}
+imm_dat <- read_csv("samips_immunization.csv", show_col_types = FALSE) %>%
+  dplyr::rename(Subject = Subject_barcode) %>% select(-subject_id)
+```
+
+## Save final metadata
+```{R}
+# Save to tsv, CSV
+mapping <- as.data.frame(mapping)
+rownames(mapping) <- mapping$Sample
+write.table(mapping, "mappingFinalHIV.tsv", row.names = TRUE, sep = "\t")
+write.csv(mapping, "mappingFinalHIV.csv", row.names = TRUE)
+```
+
+
+# Upload Instructions
+
+Upload data with `run_animalcules()` from the animalcules package.
+

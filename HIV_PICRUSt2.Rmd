@@ -1,0 +1,524 @@
+---
+title: "PICRUSt2 Analysis"
+author: "Aubrey Odom-Mabey"
+date: "4/5/2022"
+output: html_document
+---
+
+# Setup
+```{R}
+suppressPackageStartupMessages({
+  # General use
+  library(tidyverse)
+  library(knitr)
+  library(magrittr)
+  # Data formats
+  library(animalcules)
+  library(MultiAssayExperiment)
+  library(SummarizedExperiment)
+  # Diff abundance
+  library(DESeq2)
+  # plotting
+  library(ComplexHeatmap)
+})
+```
+
+# Read in data
+
+The data is functional pathway abundances using MetaCyc - metabolic pathways. It needs to be normalized before comparison in testing, etc.
+```{R}
+OG_dat <- readRDS("data/FinalDatPICRUSt2.RDS") 
+dat <- OG_dat%>%
+  TBSignatureProfiler::mkAssay(log = TRUE, counts_to_CPM = TRUE)
+
+# Normalize data and extract
+metadata <- as.data.frame(SummarizedExperiment::colData(dat))
+metadata_inf <- filter(metadata, MothChild == "Infant")
+pathways <- as.data.frame(SummarizedExperiment::rowData(dat))
+logCPM_abundances <- SummarizedExperiment::assay(dat, "log_cpm") %>%
+  as.data.frame()
+rawcounts_abundances <- SummarizedExperiment::assay(dat, "counts") %>%
+  as.data.frame()
+
+```
+
+## Checking assumptions - histograms (first 20 pathways listed)
+
+From the following plots, it is clear that the raw counts are unnormalized, and the log CPM appropriately normalizes the data.
+
+### Log CPM histogram
+```{R}
+
+logCPM_abundances[1:20, ] %>%
+  rownames_to_column(var = "pathway") %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Sample") %>%
+    ggplot(aes(x = value)) +
+    geom_histogram(bins = 30) +
+    labs(x = "Abundance", y = "log CPM",
+         title = "Histogram of metabolic pathway abundances",
+         subtitle = "Log counts per million (CPM)") +
+    facet_wrap(~pathway) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+### Raw counts histogram
+```{R}
+rawcounts_abundances[1:20, ] %>%
+  rownames_to_column(var = "pathway") %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Sample") %>%
+    ggplot(aes(x = value)) +
+    geom_histogram(bins = 30) +
+    labs(x = "Abundance", y = "Raw counts",
+         title = "Histogram of metabolic pathway abundances",
+         subtitle = "Raw counts") +
+    facet_wrap(~pathway) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+# Heatmaps
+
+## Samples vs. normalized metabolic pathway activity
+
+```{R}
+# Subset to infants
+ind <- metadata$MothChild == "Infant"
+sim_mat = as.matrix(logCPM_abundances)[, ind]
+
+HIVstat <- metadata_inf$HIVStatus
+samp <- metadata_inf$Subject
+
+# Getting color schemes
+   # HIV status
+unique_HIV <- unique(sort(HIVstat))
+HIVcol <- setNames(RColorBrewer::brewer.pal(3, "Set2")[seq_along(unique_HIV)],
+                   unique_HIV)
+unique_samp <- unique(sort(samp))
+colorset <- unlist(paletteer::palettes_d[["ggsci"]]["default_igv"])
+sampcol <- setNames(c(colorset[seq_along(unique_samp)]),
+                    unique_samp)
+colList <- list(HIVStatus = HIVcol,
+                Subject = sampcol)
+body_col = circlize::colorRamp2(c(min(logCPM_abundances),
+                                  max(logCPM_abundances)),
+                                c("#E41A1C", "#377EB8"))
+
+# Inputs
+col_title <- "column title"
+annot_df <- data.frame(HIVStatus = HIVstat,
+                      Subject = samp)
+column_order <- order(paste(HIVstat, samp))
+
+# Heatmap annotation
+topha <- ComplexHeatmap::HeatmapAnnotation(
+  df = annot_df,
+  col = colList,
+  show_legend = TRUE, show_annotation_name = TRUE)
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_infant_logCPM.png"
+png(file_save, width = 10, height =20, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(sim_mat, 
+                          column_title = col_title,
+                          top_annotation = topha,
+                          #col = body_col,
+                          column_order = column_order,
+                          name = "log cpm",
+                          show_column_names  = FALSE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+  dev.off()
+  
+# Ideas:
+  # left annotation for pathway types
+```
+### Differential abundance
+
+https://forum.qiime2.org/t/choice-of-differential-abundance-tools-for-picrust-data/19770
+```{R}
+# Create new SE object for DESeq2
+ind <- OG_dat$MothChild == "Mother"
+# I had to round to nearest integer...
+assay(OG_dat, "counts") <- round(as.matrix(assay(OG_dat, "counts")))
+OG_dat$HIVStatus <- as.factor(OG_dat$HIVStatus)
+
+# NOte on design mat
+  # Nothing is sig with HIVStatus AND timepoint
+  # Can't use nested vars (HIVStatus and subject)
+ddsSE <- DESeqDataSet(OG_dat[, ind], design = ~ HIVStatus)
+ddsSE
+
+# Pre-filter low counts
+keep <- rowSums(counts(ddsSE)) >= 10
+dds <- ddsSE[keep,]
+
+# Run DESeq
+dds <- DESeq(dds)
+res <- results(dds)
+```
+
+#### DESeq2 Results
+```{R}
+summary(res)
+
+# A greater proportion of the log fold changes are higher rather than lower
+```
+
+```{R}
+# Log fold: HIV over control (reference level)
+res_arranged <- res %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "pathway") %>%
+  arrange(desc(log2FoldChange), padj) %>%
+  filter(padj < 0.01) %>%
+  left_join(., pathways, by = "pathway") %>%
+  relocate(pathway, description, padj)
+
+# Up-regulated in HIV-E
+res_arranged %>%
+  filter(log2FoldChange > 0) %>%
+  View()
+
+# Down-regulated in HIV-E
+res_arranged %>%
+  filter(log2FoldChange < 0) %>%
+  View()
+
+```
+### HEU Heatmap with DESeq2 pathways 
+
+https://link.springer.com/article/10.1186/s12879-020-05427-3/figures/4
+
+#### By subject (timepoint nested)
+```{R}
+# Pathway abundance index
+  # Add row order??
+metadata_inf <- filter(metadata, MothChild == "Infant", HIVStatus == "HIV")
+
+# Subset to infants
+ind <- metadata$MothChild == "Infant" & metadata$HIVStatus == "HIV"
+sim_mat = as.matrix(logCPM_abundances)[res_arranged$pathway, ind]
+
+HIVstat <- metadata_inf$HIVStatus
+samp <- metadata_inf$Subject
+
+# Getting color schemes
+   # HIV status
+unique_HIV <- unique(sort(HIVstat))
+HIVcol <- setNames("#FC8D62", unique_HIV)
+unique_samp <- unique(sort(samp))
+colorset <- unlist(paletteer::palettes_d[["ggsci"]]["default_igv"])
+sampcol <- setNames(c(colorset[seq_along(unique_samp)]),
+                    unique_samp)
+colList <- list(HIVStatus = HIVcol,
+                Subject = sampcol)
+body_col = circlize::colorRamp2(c(min(logCPM_abundances),
+                                  max(logCPM_abundances)),
+                                c("#E41A1C", "#377EB8"))
+
+# Inputs
+col_title <- "Samples vs. metabolic pathway abundances"
+annot_df <- data.frame(HIVStatus = HIVstat,
+                       Subject = samp)
+# Column order nesting time within subject
+column_order <- tibble(num = seq_len(nrow(metadata_inf)), sub = metadata_inf$Subject,
+       time = metadata_inf$timepoint) %>%
+  arrange(sub, time) %>% select(num) %>% unlist() %>% unname()
+
+# Heatmap annotation
+topha <- ComplexHeatmap::HeatmapAnnotation(
+  df = annot_df,
+  col = colList,
+  show_legend = TRUE, show_annotation_name = TRUE)
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_infant_logCPM_DESeq_HIV_subject.png"
+png(file_save, width = 10, height = 12, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(sim_mat, 
+                          column_title = col_title,
+                          top_annotation = topha,
+                          #col = body_col,
+                          column_order = column_order,
+                          cluster_rows = TRUE,
+                          name = "log cpm",
+                          show_column_names  = FALSE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+  
+roworder_HIV <- ComplexHeatmap::row_order(hm)
+```
+
+#### By timepoint
+```{R}
+# Pathway abundance index
+  # Add row order??
+metadata_inf <- filter(metadata, MothChild == "Infant", HIVStatus == "HIV")
+
+# Subset to infants
+ind <- metadata$MothChild == "Infant" & metadata$HIVStatus == "HIV"
+sim_mat = as.matrix(logCPM_abundances)[res_arranged$pathway, ind]
+
+HIVstat <- metadata_inf$HIVStatus
+samp <- metadata_inf$timepoint
+
+# Getting color schemes
+   # HIV status
+unique_HIV <- unique(sort(HIVstat))
+HIVcol <- setNames("#FC8D62", unique_HIV)
+unique_samp <- unique(sort(samp))
+colorset <- unlist(paletteer::palettes_d[["ggsci"]]["default_igv"])
+sampcol <- setNames(c(colorset[seq_along(unique_samp)]),
+                    unique_samp)
+colList <- list(HIVStatus = HIVcol,
+                Timepoint = sampcol)
+body_col = circlize::colorRamp2(c(min(logCPM_abundances),
+                                  max(logCPM_abundances)),
+                                c("#E41A1C", "#377EB8"))
+
+# Inputs
+col_title <- "Samples vs. metabolic pathway abundances"
+annot_df <- data.frame(HIVStatus = HIVstat,
+                       Timepoint = samp)
+
+# Column order nesting time
+column_order <- order(metadata_inf$timepoint)
+
+# Heatmap annotation
+topha <- ComplexHeatmap::HeatmapAnnotation(
+  df = annot_df,
+  col = colList,
+  show_legend = TRUE, show_annotation_name = TRUE)
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_infant_logCPM_DESeq_HIV_timepoint.png"
+png(file_save, width = 10, height = 12, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(sim_mat, 
+                          column_title = col_title,
+                          top_annotation = topha,
+                          #col = body_col,
+                          column_order = column_order,
+                          cluster_rows = TRUE,
+                          name = "log cpm",
+                          show_column_names  = FALSE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+  
+roworder_HIV <- ComplexHeatmap::row_order(hm)
+```
+
+### HUU Heatmap with DESeq2 pathways 
+
+#### By subject (timepoint nested)
+
+```{R}
+# Pathway abundance index
+  # Add row order??
+metadata_inf <- filter(metadata, MothChild == "Infant", HIVStatus == "Control")
+
+# Subset to infants
+ind <- metadata$MothChild == "Infant" & metadata$HIVStatus == "Control"
+sim_mat = as.matrix(logCPM_abundances)[res_arranged$pathway, ind]
+
+HIVstat <- metadata_inf$HIVStatus
+samp <- metadata_inf$Subject
+
+# Getting color schemes
+   # HIV status
+unique_HIV <- unique(sort(HIVstat))
+HIVcol <- setNames("#66C2A5", unique_HIV)
+unique_samp <- unique(sort(samp))
+colorset <- unlist(paletteer::palettes_d[["ggsci"]]["springfield_simpsons"])
+sampcol <- setNames(c(colorset[seq_along(unique_samp)]),
+                    unique_samp)
+colList <- list(HIVStatus = HIVcol,
+                Subject = sampcol)
+body_col = circlize::colorRamp2(c(min(logCPM_abundances),
+                                  max(logCPM_abundances)),
+                                c("#E41A1C", "#377EB8"))
+
+# Inputs
+col_title <- "Samples vs. metabolic pathway abundances"
+annot_df <- data.frame(HIVStatus = HIVstat,
+                      Subject = samp)
+# Column order nesting time within subject
+column_order <- tibble(num = seq_len(nrow(metadata_inf)), sub = metadata_inf$Subject,
+       time = metadata_inf$timepoint) %>%
+  arrange(sub, time) %>% select(num) %>% unlist() %>% unname()
+
+# Heatmap annotation
+topha <- ComplexHeatmap::HeatmapAnnotation(
+  df = annot_df,
+  col = colList,
+  show_legend = TRUE, show_annotation_name = TRUE)
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_infant_logCPM_DESeq_HUU_subject.png"
+png(file_save, width = 10, height =12, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(sim_mat, 
+                          column_title = col_title,
+                          top_annotation = topha,
+                          row_order = roworder_HIV,
+                          #col = body_col,
+                          column_order = column_order,
+                          cluster_rows = FALSE,
+                          name = "log cpm",
+                          show_column_names  = FALSE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+```
+
+#### By timepoint
+```{R}
+# Pathway abundance index
+  # Add row order??
+metadata_inf <- filter(metadata, MothChild == "Infant", HIVStatus == "Control")
+
+# Subset to infants
+ind <- metadata$MothChild == "Infant" & metadata$HIVStatus == "Control"
+sim_mat = as.matrix(logCPM_abundances)[res_arranged$pathway, ind]
+
+HIVstat <- metadata_inf$HIVStatus
+samp <- metadata_inf$timepoint
+
+# Getting color schemes
+   # HIV status
+unique_HIV <- unique(sort(HIVstat))
+HIVcol <- setNames("#66C2A5", unique_HIV)
+unique_samp <- unique(sort(samp))
+colorset <- unlist(paletteer::palettes_d[["ggsci"]]["springfield_simpsons"])
+sampcol <- setNames(c(colorset[seq_along(unique_samp)]),
+                    unique_samp)
+colList <- list(HIVStatus = HIVcol,
+                Timepoint = sampcol)
+body_col = circlize::colorRamp2(c(min(logCPM_abundances),
+                                  max(logCPM_abundances)),
+                                c("#E41A1C", "#377EB8"))
+
+# Inputs
+col_title <- "Samples vs. metabolic pathway abundances"
+annot_df <- data.frame(HIVStatus = HIVstat,
+                      Timepoint = samp)
+# Column order nesting time within subject
+column_order <- order(samp)
+
+# Heatmap annotation
+topha <- ComplexHeatmap::HeatmapAnnotation(
+  df = annot_df,
+  col = colList,
+  show_legend = TRUE, show_annotation_name = TRUE)
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_infant_logCPM_DESeq_HUU_timepoint.png"
+png(file_save, width = 10, height =12, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(sim_mat, 
+                          column_title = col_title,
+                          top_annotation = topha,
+                          row_order = roworder_HIV,
+                          #col = body_col,
+                          column_order = column_order,
+                          cluster_rows = FALSE,
+                          name = "log cpm",
+                          show_column_names  = FALSE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+```
+
+## Microbes vs. normalized metabolic pathway abundances
+
+### Read in microbe data
+```{R}
+microbe_mi <- readRDS("data/FinalDatOther.rds")
+tax_table_mi <- as.data.frame(SummarizedExperiment::rowData(microbe_mi))
+counts_logcpm_mi <- as.data.frame(SummarizedExperiment::assay(
+  microbe_mi, "log_cpm"))
+counts_table_raw_mi <- SummarizedExperiment::assay(
+  microbe_mi, "counts") %>% as.data.frame()
+```
+
+### Calculate correlations
+Pearson's rho seems best given the normalized transformed data.
+Other options are Kendall's tau and the spearman's rho.
+```{R}
+ind <- metadata$MothChild == "Infant"
+
+microbes_inf <- counts_logcpm_mi[, ind]
+metacyc_inf <- logCPM_abundances[, ind]
+
+all_i <- seq_len(nrow(microbes_inf))
+all_j <- seq_len(nrow(metacyc_inf))
+init.mat <- tibble(ivals = rep(all_i, each = length(all_j)),
+                   jvals = rep(all_j, times = length(all_i)))
+
+get_cor <- function(i, j) {
+  cor(as.numeric(microbes_inf[i, ]),
+        as.numeric(metacyc_inf[j, ]))
+}
+
+cor_out <- apply(init.mat, 1, function(x) get_cor(x[1], x[2]))
+
+
+```
+
+### Make matrix of correlations
+```{R}
+cor_mat <- matrix(cor_out, nrow = length(all_i), 
+                  ncol = length(all_j),
+                  byrow = TRUE,
+                  dimnames = list(rownames(microbes_inf),
+                                  rownames(metacyc_inf)))
+
+# Filter to pathways with at lease one .5 correlation
+filt_lowcor_col <- apply(cor_mat, 2, function(x) max(abs(x)) > 0.7)
+filt_lowcor_row <- apply(cor_mat, 1, function(x) max(abs(x)) > 0.7)
+```
+
+### Filtered pathways only
+```{R}
+body_col <- circlize::colorRamp2(c(-1, 0, 1),
+                                c("#377EB8", "white", "#E41A1C"))
+
+# Inputs
+col_title <- "Microbial abundance vs. metabolic pathway abundances"
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_microbes_pathways_Pearson.png"
+png(file_save, width = 20, height = 20, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(cor_mat[, filt_lowcor_col], 
+                          column_title = col_title,
+                          col = body_col,
+                          name = "Pearson's correlation",
+                          show_column_names  = TRUE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+```
+
+### Filtered rows and pathways
+```{R}
+# Inputs
+col_title <- "Microbial abundance vs. metabolic pathway abundances"
+
+# Draw heamap
+file_save <- "PaperFigs/heatmap_microbes_pathways_PearsonFilt.png"
+png(file_save, width = 20, height = 10, units = "in", res = 120)
+hm <- ComplexHeatmap::draw(
+  ComplexHeatmap::Heatmap(cor_mat[filt_lowcor_row, filt_lowcor_col], 
+                          column_title = col_title,
+                          col = body_col,
+                          name = "Pearson's correlation",
+                          show_column_names  = TRUE,
+                          show_row_names  = TRUE),
+  annotation_legend_side = "right")
+dev.off()
+```
