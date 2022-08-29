@@ -89,11 +89,11 @@ as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
 ind <- tax_table_mi$species == "Other"
 tax_table_mi$phylum[ind] <- "Other"
 
-all_genera_sums <- animalcules::upsample_counts(
+all_phyla_sums <- animalcules::upsample_counts(
   counts_table_raw_mi, tax_table_mi, "phylum") %>%
   rowSums()
 
-pct <- all_genera_sums/sum(all_genera_sums)*100 %>%
+pct <- all_phyla_sums/sum(all_phyla_sums)*100 %>%
   as.vector() 
 
 as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
@@ -353,9 +353,10 @@ ggsave(filename = "PaperFigs/stacked_area_mothers.png",
 ## Alluvial plot
 
 ```{R}
-plot_alluvial <- function(input_df, MI, genus_inp) {
+plot_alluvial <- function(input_df, MI, genus_inp, HIVpos, HIVneg) {
   p <- input_df %>%
-    mutate(Genus = factor(genus, levels = genus_inp)) %>%
+    mutate(Genus = factor(genus, levels = genus_inp),
+           HIVStatus = factor(HIVStatus, levels = c("HIV", "Control"), labels = c(HIVpos, HIVneg))) %>%
     # Get into alluvial format
     select(HIVStatus, timepoint, Genus, `Relative abundance`) %>%
     ggplot(aes(y = `Relative abundance`, x = timepoint, alluvium = Genus)) +
@@ -376,7 +377,8 @@ plot_alluvial <- function(input_df, MI, genus_inp) {
 ### Alluvial plot for infants
 ```{R}
 
-plot_alluvial(input_df_inf, "Infant", genus_inp = best_genus_mi)
+plot_alluvial(input_df_inf, "Infant", genus_inp = best_genus_mi,
+              HIVpos = "HEU", HIVneg = "HUU")
 ggsave(filename = "PaperFigs/alluvial_genus_infant.png",
        width = 6, height = 4, units = "in",
        scale = 1)
@@ -384,7 +386,8 @@ ggsave(filename = "PaperFigs/alluvial_genus_infant.png",
 
 ### Alluvial plot for moms
 ```{R}
-plot_alluvial(input_df_mom, "Mother", genus_inp = best_genus_mi)
+plot_alluvial(input_df_mom, "Mother", genus_inp = best_genus_mi,
+              HIVpos = "HIV+", HIVneg = "HIV-")
 ggsave(filename = "PaperFigs/alluvial_genus_mother.png",
        width = 6, height = 4, units = "in",
        scale = 1)
@@ -573,6 +576,7 @@ save_table(results_genus, "PaperFigs/genus_ar1_gee.csv")
 ### Modeling species
 ```{R}
 # Input: create long version of CPM (both moms and infants)
+  # This is filtered to infants only when modeling
 long_lcpm_species <- create_long(counts_logcpm_mi)
 
 # Top species (more than 1%)
@@ -755,6 +759,7 @@ Hotelling_mv_T2 <- function(tmp, Group1, Group2){
 ### Paired mom-infant duads
 
 Note that this is using genera...
+
 
 ```{R mothers vs infants}
 conduct_hotelling_HIV_genus <- function(HIV_status, time = 0){
