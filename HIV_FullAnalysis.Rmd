@@ -100,6 +100,46 @@ as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
   arrange(desc(pct))
 ```
 
+### Abundances for comparison of infants to Teo et al
+
+#### HIV-Unexposed Infants
+```{R}
+# Only select infants 
+Controlsubs <- sam_table %>%
+  filter(MothChild == "Infant", HIVStatus == "Control") %>%
+  select(Sample) %>% unlist() %>% unname()
+
+Control_inf_sums <- counts_table_raw_mi %>%
+  select(all_of(Controlsubs)) %>%
+  animalcules::upsample_counts(tax_table_mi, "genus") %>%
+  rowSums()
+
+pct <- Control_inf_sums/sum(Control_inf_sums)*100 %>%
+  as.vector() 
+
+as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
+  arrange(desc(pct))
+```
+
+#### HIV-E Infants
+```{R}
+# Only select infants 
+HIVsubs <- sam_table %>%
+  filter(MothChild == "Infant", HIVStatus == "HIV") %>%
+  select(Sample) %>% unlist() %>% unname()
+
+HIV_inf_sums <- counts_table_raw_mi %>%
+  select(all_of(HIVsubs)) %>%
+  animalcules::upsample_counts(tax_table_mi, "genus") %>%
+  rowSums()
+
+pct <- HIV_inf_sums/sum(HIV_inf_sums)*100 %>%
+  as.vector() 
+
+as.data.frame(pct) %>% tibble::rownames_to_column("col") %>%
+  arrange(desc(pct))
+```
+
 ## How many unique phyla, genera, species (post-“othering”)
 ```{R}
 sp_count <- tax_table_mi %>%
